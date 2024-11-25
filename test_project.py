@@ -149,8 +149,5 @@ def main():
                 print(f"PGD attack accuracy (epsilon={args.epsilon}, alpha={args.alpha}, steps={args.steps}): {acc_pgd:.2f}%")
 
 
-
-
-
 if __name__ == "__main__":
     main()
