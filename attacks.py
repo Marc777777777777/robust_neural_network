@@ -100,7 +100,7 @@ class Attacks:
         return batch * std.view(1, -1, 1, 1) + mean.view(1, -1, 1, 1)
 
 
-    def plot(self, images, adv_images, labels, adv_labels, mean=[0.1307], std=[0.3081], num_samples=5):
+    def plot(self, images, adv_images, labels, adv_labels, title, mean=[0.1307], std=[0.3081], num_samples=5):
         """
         Plot a few samples of original images and their corresponding adversarial examples.
 
@@ -137,6 +137,6 @@ class Attacks:
             axes[1, i].imshow(adv_images[idx].permute(1, 2, 0).detach().cpu().numpy().squeeze())
             axes[1, i].set_title(f"Adv: {adv_labels[idx].item()}")
             axes[1, i].axis('off')
-
+        fig.suptitle(title)
         plt.tight_layout()
         plt.show()
