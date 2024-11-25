@@ -111,11 +111,11 @@ def main():
                         help="Set batch size.")
     parser.add_argument("-s", "--num-samples", type=int, default=1,
                         help="Num samples for testing (required to test randomized networks).")
-    parser.add_argument("--epsilon", type=float, default=0.1,
+    parser.add_argument("--epsilon", type=float, default=0.3,
                         help="Epsilon for FGSM and PGD attacks.")
     parser.add_argument("--alpha", type=float, default=0.01,
                         help="Step size for PGD attack.")
-    parser.add_argument("--steps", type=int, default=10,
+    parser.add_argument("--steps", type=int, default=3,
                         help="Number of steps for PGD attack.")
     parser.add_argument("--attack", nargs="+", choices=["pgd", "fgsm"], default=None,
                     help="Specify one or more attack types: 'pgd', 'fgsm'. If not provided, no attack is performed.")

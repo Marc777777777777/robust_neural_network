@@ -70,7 +70,7 @@ def train_model(net, train_loader, pth_filename, num_epochs):
     '''Basic training function (from pytorch doc.)'''
     print("Starting training")
     criterion = nn.NLLLoss()
-    optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+    optimizer = optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
 
     for epoch in range(num_epochs):  # loop over the dataset multiple times
 
@@ -98,54 +98,58 @@ def train_model(net, train_loader, pth_filename, num_epochs):
     net.save(pth_filename)
     print('Model saved in {}'.format(pth_filename))
 
-def train_model_adversarial(net, train_loader, pth_filename, num_epochs, epsilon=0.3, alpha=0.01, num_steps=40):
+def train_model_adversarial(net, train_loader, pth_filename, num_epochs, sigma=0.3, eps=0.03, alpha=0.01, steps=3):
     """Train the model with adversarial examples (adversarial training)."""
     print("Starting adversarial training")
-    criterion = nn.NLLLoss()
-    optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+    criterion = nn.CrossEntropyLoss()  # Use CrossEntropyLoss for multi-class classification
+    optimizer = optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
     attacks = Attacks(device)
+
     for epoch in range(num_epochs):
         running_loss = 0.0
         for i, data in enumerate(train_loader, 0):
             inputs, labels = data[0].to(device), data[1].to(device)
-            inputs.requires_grad = True
-            # Zero the parameter gradients
+
+            # Randomly choose the attack type for this batch
+            attack_type = torch.randint(0, 3, (1,)).item()  # 0: Smoothing, 1: FGSM, 2: PGD
+
+            if attack_type == 0:
+                # **Smoothing**: Add random Gaussian noise to inputs
+                epsilon = torch.randn_like(inputs, device=device) * sigma
+                inputs = torch.clamp(inputs + epsilon, 0, 1)
+            elif attack_type == 1:
+                # **FGSM Attack**: Create adversarial examples
+                inputs.requires_grad = True
+                outputs = net(inputs)
+                loss = criterion(outputs, labels)
+                net.zero_grad()
+                loss.backward()
+                grad = inputs.grad.sign()
+                inputs = attacks.fgsm_attack(inputs, eps, grad)
+            elif attack_type == 2:
+                # **PGD Attack**: Create adversarial examples
+                inputs = attacks.pgd_attack(net, inputs, labels, eps, alpha, steps)
+            # Forward pass with (potentially adversarial) inputs
+            outputs = net(inputs)
+            loss = criterion(outputs, labels)
+
+            # Backward pass and optimizer step
             optimizer.zero_grad()
-
-            # Forward pass the clean images through the model
-            outputs_clean = net(inputs)
-            loss_clean = criterion(outputs_clean, labels)
-
-            # Compute gradients w.r.t. the clean images
-            loss_clean.backward(retain_graph=True)
-            data_grad = inputs.grad.data
-
-            # Generate adversarial examples using FGSM and PGD
-            perturbed_inputs_fgsm = attacks.fgsm_attack(inputs, epsilon, data_grad)
-            perturbed_inputs_pgd = attacks.pgd_attack(net, inputs, labels, epsilon, alpha, num_steps)
-
-
-            # Forward + backward + optimize for both FGSM and PGD examples
-            outputs_fgsm = net(perturbed_inputs_fgsm)
-            outputs_pgd = net(perturbed_inputs_pgd)
-
-            # Compute the loss for both FGSM and PGD examples
-            loss_fgsm = criterion(outputs_fgsm, labels)
-            loss_pgd = criterion(outputs_pgd, labels)
-
-            # Total loss is a combination of all
-            loss = loss_fgsm + loss_pgd
             loss.backward()
             optimizer.step()
 
             # Print statistics
             running_loss += loss.item()
             if i % 500 == 499:
-                print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 2000:.3f}")
+                print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 500:.3f}")
                 running_loss = 0.0
 
-    net.save(pth_filename)
-    print(f'Model saved in {pth_filename}')
+        print(f"Epoch {epoch + 1}/{num_epochs} completed")
+
+    # Save the model
+    torch.save(net.state_dict(), pth_filename)
+    print(f"Model saved in {pth_filename}")
+
 
 def test_natural(net, test_loader):
     '''Basic testing function.'''
@@ -196,7 +200,7 @@ def main():
                         help="Epsilon value for adversarial training (default is 0.3).")
     parser.add_argument('--alpha', type=float, default=0.01,
                         help="Step size for PGD attack.")
-    parser.add_argument('--num-steps', type=int, default=40,
+    parser.add_argument('--num-steps', type=int, default= 3,
                         help="Number of steps for PGD attack.")
     parser.add_argument('--adversarial', action="store_true",
                         help="Flag to enable adversarial training with FGSM and PGD.")
@@ -217,10 +221,9 @@ def main():
         print(next(iter(train_loader))[0].shape)
         # Train with combined adversarial examples (FGSM + PGD)
         if args.adversarial:
-            train_model_adversarial(net, train_loader, args.model_file, args.num_epochs,
-                                             epsilon=args.epsilon, alpha=args.alpha, num_steps=args.num_steps)
+            train_model_adversarial(net, train_loader, args.model_file, args.num_epochs, eps=args.epsilon, alpha=args.alpha, steps=args.num_steps)
         else:
-            train_model_regular(net, train_loader, args.model_file, args.num_epochs)
+            train_model(net, train_loader, args.model_file, args.num_epochs)
 
         print(f"Model saved to '{args.model_file}'.")
 
