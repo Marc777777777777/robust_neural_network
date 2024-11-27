@@ -113,8 +113,6 @@ class Attacks:
             std (torch.Tensor or list): Standard deviation used for normalization.
             num_samples (int): Number of samples to display.
         """
-        import matplotlib.pyplot as plt
-        import random
 
         # Denormalize the images
         images = self.denorm(images, mean, std)
