@@ -93,6 +93,30 @@ def test_pgd(net, test_loader, epsilon, alpha, steps):
         correct += (predicted == labels).sum().item()
     return 100 * correct / total
 
+def test_cw(net, test_loader, c, kappa, steps, lr):
+    attacks = Attacks(device)
+    correct = 0
+    total = 0
+    for data in test_loader:
+        images, labels = data[0].to(device), data[1].to(device)
+
+        # Generate adversarial examples
+        perturbed_images = attacks.cw_attack(
+            model=net,
+            images=images,
+            labels=labels,
+            c=c,
+            kappa=kappa,
+            steps=steps,
+            lr=lr,
+        )
+        # Test with adversarial examples
+        outputs = net(perturbed_images)
+        _, predicted = torch.max(outputs.data, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+    return 100 * correct / total
+
 
 
 def get_validation_loader(dataset, valid_size=1024, batch_size=32):
@@ -117,7 +141,11 @@ def main():
                         help="Step size for PGD attack.")
     parser.add_argument("--steps", type=int, default=3,
                         help="Number of steps for PGD attack.")
-    parser.add_argument("--attack", nargs="+", choices=["pgd", "fgsm"], default=None,
+    parser.add_argument("--c", type=float, default=1e-4,
+                        help="C value for Carlini-Wagner attack.")
+    parser.add_argument("--kappa", type=float, default=0.01,
+                        help="Kappa value for Carlini-Wagner attack.")
+    parser.add_argument("--attack", nargs="+", choices=["pgd", "fgsm", "cw"], default=None,
                     help="Specify one or more attack types: 'pgd', 'fgsm'. If not provided, no attack is performed.")
 
 
@@ -147,6 +175,12 @@ def main():
             elif attack == "pgd":
                 acc_pgd = test_pgd(net, valid_loader, epsilon=args.epsilon, alpha=args.alpha, steps=args.steps)
                 print(f"PGD attack accuracy (epsilon={args.epsilon}, alpha={args.alpha}, steps={args.steps}): {acc_pgd:.2f}%")
+            elif attack == "cw":
+                acc_cw = test_cw(net, valid_loader, c=args.c, kappa=args.kappa, steps=args.steps, lr=0.01)
+                print(f"Carlini-Wagner attack accuracy (c=1e-4, kappa=0, steps=1000, lr=0.01): {acc_cw:.2f}%")
+            else:
+                print(f"Unknown attack: {attack}")
+
 
 
 if __name__ == "__main__":

@@ -19,14 +19,39 @@ from variable import device
 valid_size = 1024
 batch_size = 32
 
+class ParametricNoise(nn.Module):
+    def __init__(self, shape, init_std=0.01):
+        """
+        Initialize learnable noise with the specified shape and standard deviation.
+
+        Args:
+            shape (tuple): Shape of the noise tensor.
+            init_std (float): Initial standard deviation for noise initialization.
+        """
+        super().__init__()
+        self.noise = nn.Parameter(torch.randn(shape) * init_std)
+
+    def forward(self, x):
+        """
+        Add noise to the input tensor.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Input tensor with added noise.
+        """
+        return x + self.noise
+
+
 '''Basic neural network architecture (from pytorch doc).'''
 class Net(nn.Module):
-
-    model_file="models/default_model.pth"
+    model_file = "models/default_model.pth"
     '''This file will be loaded to test your model. Use --model-file to load/store a different model.'''
 
-    def __init__(self):
+    def __init__(self, parametric_noise=False):
         super().__init__()
+        self.parametric_noise = parametric_noise
         self.conv1 = nn.Conv2d(3, 6, 5)
         self.pool = nn.MaxPool2d(2, 2)
         self.conv2 = nn.Conv2d(6, 16, 5)
@@ -34,14 +59,32 @@ class Net(nn.Module):
         self.fc2 = nn.Linear(120, 84)
         self.fc3 = nn.Linear(84, 10)
 
+        # Add parametric noise layers if enabled
+        if parametric_noise:
+            self.noise1 = ParametricNoise((6, 14, 14), init_std=0.01)  # After first pooling
+            self.noise2 = ParametricNoise((16, 5, 5), init_std=0.01)  # After second pooling
+            self.noise3 = ParametricNoise((16 * 5 * 5,), init_std=0.01)  # Before fully connected layers
+
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        x = F.log_softmax(x, dim=1)
+        x = self.pool(F.relu(self.conv1(x)))  # First convolution and pooling
+
+        if self.parametric_noise:
+            x = self.noise1(x)  # Inject noise after the first pooling layer
+
+        x = self.pool(F.relu(self.conv2(x)))  # Second convolution and pooling
+
+        if self.parametric_noise:
+            x = self.noise2(x)  # Inject noise after the second pooling layer
+
+        x = torch.flatten(x, 1)  # Flatten feature maps
+
+        if self.parametric_noise:
+            x = self.noise3(x)  # Inject noise before the fully connected layers
+
+        x = F.relu(self.fc1(x))  # First fully connected layer
+        x = F.relu(self.fc2(x))  # Second fully connected layer
+        x = self.fc3(x)  # Output layer
+        x = F.log_softmax(x, dim=1)  # Log-softmax for classification probabilities
         return x
 
     def save(self, model_file):
@@ -98,7 +141,7 @@ def train_model(net, train_loader, pth_filename, num_epochs):
     net.save(pth_filename)
     print('Model saved in {}'.format(pth_filename))
 
-def train_model_adversarial(net, train_loader, pth_filename, num_epochs, sigma=0.3, eps=0.03, alpha=0.01, steps=3):
+def train_model_adversarial(net, train_loader, pth_filename, num_epochs, sigma=0.3, eps=0.03, alpha=0.01, steps=3, c=1e-4, kappa=0):
     """Train the model with adversarial examples (adversarial training)."""
     print("Starting adversarial training")
     criterion = nn.CrossEntropyLoss()  # Use CrossEntropyLoss for multi-class classification
@@ -109,10 +152,8 @@ def train_model_adversarial(net, train_loader, pth_filename, num_epochs, sigma=0
         running_loss = 0.0
         for i, data in enumerate(train_loader, 0):
             inputs, labels = data[0].to(device), data[1].to(device)
-
             # Randomly choose the attack type for this batch
-            attack_type = torch.randint(0, 3, (1,)).item()  # 0: Smoothing, 1: FGSM, 2: PGD
-
+            attack_type = torch.randint(0, 5, (1,)).item()  # 0: Smoothing, 1: FGSM, 2: PGD, 3: CW, 4: None
             if attack_type == 0:
                 # **Smoothing**: Add random Gaussian noise to inputs
                 epsilon = torch.randn_like(inputs, device=device) * sigma
@@ -129,6 +170,12 @@ def train_model_adversarial(net, train_loader, pth_filename, num_epochs, sigma=0
             elif attack_type == 2:
                 # **PGD Attack**: Create adversarial examples
                 inputs = attacks.pgd_attack(net, inputs, labels, eps, alpha, steps)
+            elif attack_type == 3:
+                # **Carlini-Wagner Attack**: Create adversarial examples
+                inputs = attacks.cw_attack(net, inputs, labels, c= c , kappa= kappa, steps= steps, lr=0.01)
+            else:
+                # **No Attack**: Use the original inputs
+                pass
             # Forward pass with (potentially adversarial) inputs
             outputs = net(inputs)
             loss = criterion(outputs, labels)
@@ -204,6 +251,10 @@ def main():
                         help="Number of steps for PGD attack.")
     parser.add_argument('--adversarial', action="store_true",
                         help="Flag to enable adversarial training with FGSM and PGD.")
+    parser.add_argument('--c', type=float, default=1e-4,
+                        help="c parameter for CW attack.")
+    parser.add_argument('--kappa', type=float, default=0.01,
+                        help="kappa parameter for CW attack.")
     args = parser.parse_args()
 
     #### Create model and move it to whatever device is available (gpu/cpu)
@@ -221,7 +272,7 @@ def main():
         print(next(iter(train_loader))[0].shape)
         # Train with combined adversarial examples (FGSM + PGD)
         if args.adversarial:
-            train_model_adversarial(net, train_loader, args.model_file, args.num_epochs, eps=args.epsilon, alpha=args.alpha, steps=args.num_steps)
+            train_model_adversarial(net, train_loader, args.model_file, args.num_epochs, eps=args.epsilon, alpha=args.alpha, steps=args.num_steps, c= args.c, kappa= args.kappa)
         else:
             train_model(net, train_loader, args.model_file, args.num_epochs)
 

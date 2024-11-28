@@ -79,6 +79,68 @@ class Attacks:
 
         return adv_images
 
+    def cw_attack(self, model, images, labels, c=1e-4, kappa=0, steps=1000, lr=0.01):
+        """
+        Perform Carlini & Wagner (C&W) attack.
+
+        Args:
+            model (nn.Module): The target model.
+            images (torch.Tensor): Original images.
+            labels (torch.Tensor): True labels for untargeted attack or target labels for targeted attack.
+            c (float): Confidence parameter for the optimization objective.
+            kappa (float): Confidence margin (higher values make adversarial examples more confident).
+            steps (int): Number of optimization steps.
+            lr (float): Learning rate for the optimizer.
+
+        Returns:
+            torch.Tensor: Adversarial examples.
+        """
+        images = images.clone().detach().to(self.device)
+        labels = labels.clone().detach().to(self.device)
+
+        # Initialize the perturbation variable
+        perturbation = torch.zeros_like(images, requires_grad=True, device=self.device)
+
+
+        optimizer = torch.optim.Adam([perturbation], lr=lr)
+
+        # Define the tanh space transformation
+        def to_tanh_space(x):
+            return 0.5 * (torch.tanh(x) + 1)
+
+        def from_tanh_space(x):
+            return 0.5 * torch.log((1 + x) / (1 - x))
+
+
+        tanh_images = from_tanh_space(images)
+
+        for step in range(steps):
+
+            adv_images = to_tanh_space(tanh_images + perturbation)
+
+            # Forward pass through the model
+            outputs = model(adv_images)
+
+            # Compute the real and other logits
+            real = outputs.gather(1, labels.view(-1, 1)).squeeze(1)
+            other = torch.max(outputs * (1 - torch.eye(outputs.size(1), device=self.device)[labels]), dim=1)[0]
+
+
+            # Compute the C&W loss
+            f_loss = torch.clamp(other - real + kappa, min=0) if step % 2 == 0 else torch.clamp(real - other - kappa, min=0)
+            l2_loss = torch.sum((adv_images - images) ** 2, dim=[1, 2, 3])
+            loss = torch.mean(c * f_loss + l2_loss)
+
+            # Backpropagation and optimization step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        # Final adversarial examples
+        adv_images = to_tanh_space(tanh_images + perturbation).detach()
+        return adv_images
+
+
     # Restore the tensors to their original scale
     def denorm(self, batch, mean=[0.1307], std=[0.3081]):
         """
