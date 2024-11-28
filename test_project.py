@@ -147,12 +147,13 @@ def main():
                         help="Kappa value for Carlini-Wagner attack.")
     parser.add_argument("--attack", nargs="+", choices=["pgd", "fgsm", "cw"], default=None,
                     help="Specify one or more attack types: 'pgd', 'fgsm'. If not provided, no attack is performed.")
+    parser.add_argument("--param_noise", action="store_true", default=False, help="Use parametric noise.")
 
 
     args = parser.parse_args()
     project_module = load_project(args.project_dir)
 
-    net = project_module.Net()
+    net = project_module.Net(parametric_noise = args.param_noise)
     net.to(device)
     net.load_for_testing(project_dir=args.project_dir)
 
