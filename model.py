@@ -153,7 +153,7 @@ def train_model_adversarial(net, train_loader, pth_filename, num_epochs, sigma=0
         for i, data in enumerate(train_loader, 0):
             inputs, labels = data[0].to(device), data[1].to(device)
             # Randomly choose the attack type for this batch
-            attack_type = torch.randint(0, 5, (1,)).item()  # 0: Smoothing, 1: FGSM, 2: PGD, 3: CW, 4: None
+            attack_type = torch.randint(0, 7, (1,)).item()  # 0: Smoothing, 1: FGSM, 2: PGD, 3: CW, Rest: None
             if attack_type == 0:
                 # **Smoothing**: Add random Gaussian noise to inputs
                 epsilon = torch.randn_like(inputs, device=device) * sigma
@@ -255,10 +255,11 @@ def main():
                         help="c parameter for CW attack.")
     parser.add_argument('--kappa', type=float, default=0.01,
                         help="kappa parameter for CW attack.")
+    parser.add_argument("--param_noise", action="store_false", help="Disable parametric noise.")
     args = parser.parse_args()
 
     #### Create model and move it to whatever device is available (gpu/cpu)
-    net = Net()
+    net = Net(parametric_noise=args.param_noise)
     net.to(device)
 
     #### Model training (if necessary)
