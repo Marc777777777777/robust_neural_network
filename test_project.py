@@ -147,7 +147,8 @@ def main():
                         help="Kappa value for Carlini-Wagner attack.")
     parser.add_argument("--attack", nargs="+", choices=["pgd", "fgsm", "cw"], default=None,
                     help="Specify one or more attack types: 'pgd', 'fgsm'. If not provided, no attack is performed.")
-    parser.add_argument("--param_noise", action="store_true", default=False, help="Use parametric noise.")
+    parser.add_argument("--param_noise", action="store_false", help="Disable parametric noise.")
+
 
 
     args = parser.parse_args()

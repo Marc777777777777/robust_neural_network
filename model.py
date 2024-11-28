@@ -255,7 +255,7 @@ def main():
                         help="c parameter for CW attack.")
     parser.add_argument('--kappa', type=float, default=0.01,
                         help="kappa parameter for CW attack.")
-    parser.add_argument('--param_noise', action="store_true", help="Add parametric noise layers.")
+    parser.add_argument("--param_noise", action="store_false", help="Disable parametric noise.")
     args = parser.parse_args()
 
     #### Create model and move it to whatever device is available (gpu/cpu)
