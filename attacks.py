@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
 import random
 
 class Attacks:
@@ -161,42 +160,3 @@ class Attacks:
 
         return batch * std.view(1, -1, 1, 1) + mean.view(1, -1, 1, 1)
 
-
-    def plot(self, images, adv_images, labels, adv_labels, title, mean=[0.1307], std=[0.3081], num_samples=5):
-        """
-        Plot a few samples of original images and their corresponding adversarial examples.
-
-        Args:
-            images (torch.Tensor): Original images.
-            adv_images (torch.Tensor): Adversarial images.
-            labels (torch.Tensor): True labels for the original images.
-            adv_labels (torch.Tensor): Predicted labels for the adversarial images.
-            mean (torch.Tensor or list): Mean used for normalization.
-            std (torch.Tensor or list): Standard deviation used for normalization.
-            num_samples (int): Number of samples to display.
-        """
-
-        # Denormalize the images
-        images = self.denorm(images, mean, std)
-        adv_images = self.denorm(adv_images, mean, std)
-
-        # Ensure num_samples is not greater than the number of available images
-        num_samples = min(num_samples, images.size(0))
-
-        # Randomly select indices for the samples
-        indices = random.sample(range(images.size(0)), num_samples)
-
-        # Create the plot
-        fig, axes = plt.subplots(2, num_samples, figsize=(num_samples * 2, 4))
-
-        for i, idx in enumerate(indices):
-            axes[0, i].imshow(images[idx].permute(1, 2, 0).detach().cpu().numpy().squeeze())
-            axes[0, i].set_title(f"True: {labels[idx].item()}")
-            axes[0, i].axis('off')
-
-            axes[1, i].imshow(adv_images[idx].permute(1, 2, 0).detach().cpu().numpy().squeeze())
-            axes[1, i].set_title(f"Adv: {adv_labels[idx].item()}")
-            axes[1, i].axis('off')
-        fig.suptitle(title)
-        plt.tight_layout()
-        plt.show()
