@@ -49,7 +49,7 @@ class Net(nn.Module):
     model_file = "models/default_model.pth"
     '''This file will be loaded to test your model. Use --model-file to load/store a different model.'''
 
-    def __init__(self, parametric_noise=False):
+    def __init__(self, parametric_noise= True):
         super().__init__()
         self.parametric_noise = parametric_noise
         self.conv1 = nn.Conv2d(3, 6, 5)
