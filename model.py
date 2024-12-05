@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data
 import torchvision.transforms as transforms
+import matplotlib.pyplot as plt
 
 from attacks import Attacks
 from variable import device
@@ -17,7 +18,7 @@ from variable import device
 # device = torch.device("cuda" if use_cuda else "cpu")
 
 valid_size = 1024
-batch_size = 256
+batch_size = 32
 
 
 class RandomizedEnsembleClassifier(nn.Module):
@@ -119,33 +120,26 @@ class Net(nn.Module):
             self.noise2 = ParametricNoise((16, 5, 5), init_std=0.01)  # After second pooling
             self.noise3 = ParametricNoise((16 * 5 * 5,), init_std=0.01)  # Before fully connected layers
 
-    def forward(self, x, labels=None):
-        x = self.pool(F.relu(self.conv1(x)))
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))      #batch_size,6,28,28 then batch_size,6,14,14
+
         if self.parametric_noise:
             x = self.noise1(x)
-        x = self.pool(F.relu(self.conv2(x)))
+
+        x = self.pool(F.relu(self.conv2(x)))      #batch_size,16,10,10 then batch_size,16,5,5
+
         if self.parametric_noise:
             x = self.noise2(x)
-        x = torch.flatten(x, 1)
+
+        x = torch.flatten(x, 1)                   #batch_size, 16*5*5
+
         if self.parametric_noise:
             x = self.noise3(x)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
 
-        num_classes = self.fc3.weight.size(0)  # Nombre total de classes
-
-        if self.training and labels is not None:
-            # Reverse Attention pendant l'entraînement
-            omega = self.fc3.weight[labels.clamp(0, num_classes - 1)]
-        else:
-            # Reverse Attention pendant le test
-            predicted_classes = torch.argmax(x, dim=1)
-            predicted_classes = predicted_classes.clamp(0, num_classes - 1)  # Clamp des indices
-            omega = self.fc3.weight[predicted_classes]
-
-        x = x * omega  # Multiplication élément par élément
-        x = self.fc3(x)
-        x = F.log_softmax(x, dim=1)
+        x = F.relu(self.fc1(x))                   #batch_size, 120
+        x = F.relu(self.fc2(x))                   #batch_size, 84
+        x = self.fc3(x)                           #batch_size, 10
+        x = F.log_softmax(x, dim=1)               #batch_size, 10
         return x
 
 
@@ -180,6 +174,45 @@ class Net(nn.Module):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return x
+
+# Fonction de similarité
+def similarity(z1, z2):
+    """Calculer la similarité cosinus entre deux vecteurs."""
+    return F.cosine_similarity(z1, z2, dim=-1)
+
+# Perte de contraste négative asymétrique
+def asymmetric_negative_contrast(z_nat, z_neg, alpha=0.9):
+    """
+    Calcul de la perte de contraste négative asymétrique.
+    Args:
+        z_nat (torch.Tensor): Vecteurs de caractéristiques des exemples naturels.
+        z_neg (torch.Tensor): Vecteurs de caractéristiques des exemples négatifs.
+        alpha (float): Facteur de pondération pour l'asymétrie.
+    Returns:
+        torch.Tensor: La perte ANC.
+    """
+    sim_nat_neg = similarity(z_nat, z_neg)
+    sim_neg_nat = similarity(z_neg, z_nat)
+    loss_anc = alpha * sim_nat_neg + (1 - alpha) * sim_neg_nat.detach()
+    return loss_anc.mean()
+
+# Génération d'exemples négatifs
+def generate_negatives(inputs, labels, model, epsilon=0.03, alpha=0.007, steps=10):
+    """
+    Génère des exemples négatifs à l'aide d'une attaque ciblée.
+    Args:
+        inputs (torch.Tensor): Exemples naturels.
+        labels (torch.Tensor): Labels des exemples.
+        model (torch.nn.Module): Modèle pour générer les attaques.
+    Returns:
+        torch.Tensor: Exemples négatifs.
+    """
+    targeted_labels = (labels + 1) % 10  # Exemple de label cible (prochaine classe)
+    negatives = Attacks(device).pgd_attack(
+        model, inputs, targeted_labels, eps=epsilon, alpha=alpha, steps=steps, targeted=True
+    )
+    return negatives
+
 
 def train_model(net, train_loader, val_loader, pth_filename, num_epochs):
     '''Basic training function (from pytorch doc.)'''
@@ -305,7 +338,6 @@ def train_model_adversarial(net, train_loader, val_loader, pth_filename, num_epo
             # Combinaison des pertes
             loss = loss_cls + 0.1 * loss_anc  # Pondération de la perte ANC
 
-
             # Backward pass and optimizer step
             optimizer.zero_grad()
             loss.backward()
@@ -339,7 +371,7 @@ def train_model_adversarial(net, train_loader, val_loader, pth_filename, num_epo
         avg_val_loss = val_loss / len(val_loader)
         list_val_loss.append(avg_val_loss)
 
-        print(f"Epoch {epoch + 1}: Validation Loss: {avg_val_loss:.3f}")
+        print(f"Epoch {epoch + 1}: Validation Loss: {avg_val_loss:.3f}, Validation Accuracy: {accuracy:.2f}")
 
     plt.plot(np.linspace(0,num_epochs,len(list_loss)+1)[1:],list_loss)
     plt.plot(range(1,num_epochs+1), list_val_loss, label="Validation Loss")
@@ -395,43 +427,6 @@ def get_validation_loader(dataset, valid_size=1024, batch_size=32):
 
     return valid
 
-# Fonction de similarité
-def similarity(z1, z2):
-    """Calculer la similarité cosinus entre deux vecteurs."""
-    return F.cosine_similarity(z1, z2, dim=-1)
-
-# Perte de contraste négative asymétrique
-def asymmetric_negative_contrast(z_nat, z_neg, alpha=0.9):
-    """
-    Calcul de la perte de contraste négative asymétrique.
-    Args:
-        z_nat (torch.Tensor): Vecteurs de caractéristiques des exemples naturels.
-        z_neg (torch.Tensor): Vecteurs de caractéristiques des exemples négatifs.
-        alpha (float): Facteur de pondération pour l'asymétrie.
-    Returns:
-        torch.Tensor: La perte ANC.
-    """
-    sim_nat_neg = similarity(z_nat, z_neg)
-    sim_neg_nat = similarity(z_neg, z_nat)
-    loss_anc = alpha * sim_nat_neg + (1 - alpha) * sim_neg_nat.detach()
-    return loss_anc.mean()
-
-# Génération d'exemples négatifs
-def generate_negatives(inputs, labels, model, epsilon=0.03, alpha=0.007, steps=10):
-    """
-    Génère des exemples négatifs à l'aide d'une attaque ciblée.
-    Args:
-        inputs (torch.Tensor): Exemples naturels.
-        labels (torch.Tensor): Labels des exemples.
-        model (torch.nn.Module): Modèle pour générer les attaques.
-    Returns:
-        torch.Tensor: Exemples négatifs.
-    """
-    targeted_labels = (labels + 1) % 10  # Exemple de label cible (prochaine classe)
-    negatives = Attacks(device).pgd_attack(
-        model, inputs, targeted_labels, eps=epsilon, alpha=alpha, steps=steps, targeted=True
-    )
-    return negatives
 
 def main():
     #### Parse command line arguments
@@ -440,7 +435,7 @@ def main():
                         help="Name of the file used to load or to store the model weights.")
     parser.add_argument('-f', '--force-train', action="store_true",
                         help="Force training even if model file already exists.")
-    parser.add_argument('-e', '--num-epochs', type=int, default=10,
+    parser.add_argument('-e', '--num-epochs', type=int, default=30,
                         help="Set the number of epochs during training.")
     parser.add_argument('--epsilon', type=float, default=0.3,
                         help="Epsilon value for adversarial training (default is 0.3).")
