@@ -118,6 +118,39 @@ def test_cw(net, test_loader, c, kappa, steps, lr):
     return 100 * correct / total
 
 
+def test_model_robustness(model, dataloader, attack_fn, device):
+    """
+    Test the model robustness under a specific attack.
+
+    Args:
+        model (nn.Module): Trained model.
+        dataloader (DataLoader): DataLoader for the dataset.
+        attack_fn (function): Function to generate adversarial examples.
+        device (torch.device): Device to run the test on.
+
+    Returns:
+        float: Accuracy under the given attack.
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    for images, labels in dataloader:
+        images, labels = images.to(device), labels.to(device)
+
+        # Generate adversarial examples
+        adv_images = attack_fn(images, labels)
+
+        # Predict on adversarial examples
+        outputs = model(adv_images)
+        _, predicted = outputs.max(1)
+
+        # Calculate accuracy
+        correct += (predicted == labels).sum().item()
+        total += labels.size(0)
+
+    return correct / total
+
 
 def get_validation_loader(dataset, valid_size=1024, batch_size=32):
     '''Split dataset into [train:valid] and return a DataLoader for the validation part.'''
