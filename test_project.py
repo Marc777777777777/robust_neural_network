@@ -187,9 +187,10 @@ def main():
     args = parser.parse_args()
     project_module = load_project(args.project_dir)
 
-    net = project_module.Net(parametric_noise = args.param_noise)
+    net = project_module.Net()
     net.to(device)
     net.load_for_testing(project_dir=args.project_dir)
+
 
     transform = transforms.Compose([transforms.ToTensor()])
     cifar = torchvision.datasets.CIFAR10('./data/', download=True, transform=transform)
@@ -212,7 +213,7 @@ def main():
                 print(f"PGD attack accuracy (epsilon={args.epsilon}, alpha={args.alpha}, steps={args.steps}): {acc_pgd:.2f}%")
             elif attack == "cw":
                 acc_cw = test_cw(net, valid_loader, c=args.c, kappa=args.kappa, steps=args.steps, lr=0.01)
-                print(f"Carlini-Wagner attack accuracy (c=1e-4, kappa=0, steps=1000, lr=0.01): {acc_cw:.2f}%")
+                print(f"Carlini-Wagner attack accuracy (c={args.c}, kappa={args.kappa}, steps={args.steps}, lr=0.01): {acc_cw:.2f}%")
             else:
                 print(f"Unknown attack: {attack}")
 
