@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data
 import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
+
 
 from attacks import Attacks
 from variable import device
@@ -74,6 +74,51 @@ class DeterministicEnsembleClassifier(nn.Module):
     outputs = torch.stack([classifier(x) for classifier in self.classifiers], dim=0)
     return torch.sum(outputs,0)
 
+class LWTADense(nn.Module):
+    def __init__(self, in_features, out_features, num_units):
+        """
+        Dense layer with LWTA activations.
+        """
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.num_units = num_units
+        self.linear = nn.Linear(in_features, out_features * num_units)
+
+    def forward(self, x):
+        """
+        Forward pass for the dense LWTA layer.
+        """
+        x = self.linear(x)  # Shape: [batch_size, out_features * num_units]
+        batch_size = x.size(0)
+        x = x.view(batch_size, self.out_features, self.num_units)  # [batch_size, out_features, num_units]
+        logits = F.softmax(x, dim=2)  # Probabilities
+        winners = torch.multinomial(logits.view(-1, self.num_units), num_samples=1).squeeze(-1)  # Winner indices
+        one_hot = F.one_hot(winners, num_classes=self.num_units).float()  # One-hot encoding
+        one_hot = one_hot.view(batch_size, self.out_features, self.num_units)
+        return (x * one_hot).sum(dim=2)  # Final output: [batch_size, out_features]
+
+class LWTAConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, num_units, stride=1, padding=0):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels * num_units, kernel_size, stride, padding)
+        self.num_units = num_units
+
+    def forward(self, x):
+        """
+        Forward pass for LWTA convolutional layer.
+        """
+        x = self.conv(x)  # Shape: [batch_size, out_channels * num_units, height, width]
+        batch_size, _, height, width = x.size()
+        x = x.view(batch_size, -1, self.num_units, height, width)  # Group units in blocks
+        logits = F.softmax(x, dim=2)  # Compute probabilities
+        logits_flat = logits.permute(0, 3, 4, 1, 2).reshape(-1, self.num_units)  # Flatten for sampling
+        winners_flat = torch.multinomial(logits_flat, num_samples=1).squeeze(-1)  # Sample winners
+        winners = winners_flat.view(batch_size, height, width, -1).permute(0, 3, 1, 2)  # Reshape winners
+        one_hot = F.one_hot(winners, num_classes=self.num_units).permute(0, 1, 4, 2, 3).float()  # One-hot encoding
+        return (x * one_hot).sum(dim=2)  # Final output: [batch_size, out_channels, height, width]
+
+
 class ParametricNoise(nn.Module):
     def __init__(self, shape, init_std=0.01):
         """
@@ -98,51 +143,144 @@ class ParametricNoise(nn.Module):
         """
         return x + self.noise
 
-'''Basic neural network architecture (from pytorch doc).'''
-class Net(nn.Module):
+def predict_with_sampling(model, dataloader, num_samples=10):
+    """
+    Prédit les labels avec échantillonnage multiple.
+    Args:
+        model (nn.Module): Modèle avec LWTA.
+        dataloader (torch.utils.data.DataLoader): Données à tester.
+        num_samples (int): Nombre d'échantillons pour la moyenne.
 
-    model_file="models/default_model.pth"
-    '''This file will be loaded to test your model. Use --model-file to load/store a different model.'''
+    Returns:
+        float: Précision moyenne.
+    """
+    model.eval()
+    total = 0
+    correct = 0
 
-    def __init__(self, parametric_noise=False):
-        super().__init__()                        #Number of parameters:
-        self.parametric_noise = parametric_noise
-        self.conv1 = nn.Conv2d(3, 6, 5)           #5 x 5 × 3 × 6 + 6          = 456
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)          #5 x 5 × 6 × 16 + 16        = 2416
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)     #16 x 5 x 5 x 120 + 120     = 48120
-        self.fc2 = nn.Linear(120, 84)             #120 x 84 + 120             = 10164
-        self.fc3 = nn.Linear(84, 10)              #84 x 10 + 10               = 850
-                                                  #Total                      = 61,006
-        # Add parametric noise layers if enabled
-        if parametric_noise:
-            self.noise1 = ParametricNoise((6, 14, 14), init_std=0.01)  # After first pooling
-            self.noise2 = ParametricNoise((16, 5, 5), init_std=0.01)  # After second pooling
-            self.noise3 = ParametricNoise((16 * 5 * 5,), init_std=0.01)  # Before fully connected layers
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            batch_predictions = []
+
+            for _ in range(num_samples):
+                outputs = model(inputs)
+                batch_predictions.append(outputs)
+
+            # Moyenne des prédictions
+            avg_predictions = torch.mean(torch.stack(batch_predictions), dim=0)
+            _, predicted = avg_predictions.max(1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    return 100 * correct / total
+
+class LWTAELBOLoss(nn.Module):
+    def __init__(self, temperature=1.0, num_units=2):
+        """
+        Initialise la perte ELBO pour les couches LWTA.
+        Args:
+            temperature (float): Facteur de température pour la relaxation.
+            num_units (int): Nombre d'unités par bloc.
+        """
+        super(LWTAELBOLoss, self).__init__()
+        self.temperature = temperature
+        self.num_units = num_units
+        self.cross_entropy = nn.CrossEntropyLoss()
+
+    def forward(self, outputs, targets, logits):
+        """
+        Calcule la perte ELBO.
+        Args:
+            outputs (torch.Tensor): Sorties du modèle (après softmax).
+            targets (torch.Tensor): Labels réels.
+            logits (torch.Tensor): Logits avant softmax.
+
+        Returns:
+            torch.Tensor: Perte ELBO combinée.
+        """
+        # Cross-Entropy Loss
+        ce_loss = self.cross_entropy(outputs, targets)
+
+        # KL Divergence
+        log_q = F.log_softmax(logits / self.temperature, dim=-1)
+        log_p = -torch.log(torch.tensor(self.num_units, device=logits.device).float())
+        kl_divergence = (log_q - log_p).mean()
+
+        # Combine les deux termes
+        elbo_loss = ce_loss - kl_divergence
+        return elbo_loss
+
+class LWTAConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, num_units, stride=1, padding=0):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels * num_units, kernel_size, stride, padding)
+        self.num_units = num_units
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))      #batch_size,6,28,28 then batch_size,6,14,14
+        x = self.conv(x)
+        batch_size, _, height, width = x.size()
+        x = x.view(batch_size, -1, self.num_units, height, width)
+        logits = F.softmax(x, dim=2)
+        logits_flat = logits.permute(0, 3, 4, 1, 2).reshape(-1, self.num_units)
+        winners_flat = torch.multinomial(logits_flat, num_samples=1).squeeze(-1)
+        winners = winners_flat.view(batch_size, height, width, -1).permute(0, 3, 1, 2)
+        one_hot = F.one_hot(winners, num_classes=self.num_units).permute(0, 1, 4, 2, 3).float()
+        return (x * one_hot).sum(dim=2)
 
-        if self.parametric_noise:
-            x = self.noise1(x)
+class WideBasicBlock(nn.Module):
+    def __init__(self, in_planes, planes, widen_factor, stride=1):
+        super().__init__()
+        self.lwta_conv1 = LWTAConv(in_planes, planes * widen_factor, kernel_size=3, num_units=2, stride=stride, padding=1)
+        self.bn1 = nn.BatchNorm2d(planes * widen_factor)
+        self.lwta_conv2 = LWTAConv(planes * widen_factor, planes * widen_factor, kernel_size=3, num_units=2, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(planes * widen_factor)
 
-        x = self.pool(F.relu(self.conv2(x)))      #batch_size,16,10,10 then batch_size,16,5,5
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_planes != planes * widen_factor:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_planes, planes * widen_factor, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * widen_factor)
+            )
 
-        if self.parametric_noise:
-            x = self.noise2(x)
+    def forward(self, x):
+        out = F.relu(self.bn1(self.lwta_conv1(x)))
+        out = self.bn2(self.lwta_conv2(out))
+        out += self.shortcut(x)
+        return F.relu(out)
 
-        x = torch.flatten(x, 1)                   #batch_size, 16*5*5
+class Net(nn.Module):
+    model_file="models/default_model.pth"
+    '''This file will be loaded to test your model. Use --model-file to load/store a different model.'''
+    def __init__(self, widen_factor=1, num_classes=10):
+        super().__init__()
+        self.in_planes = 16
 
-        if self.parametric_noise:
-            x = self.noise3(x)
+        def wide_layer(block, planes, num_blocks, stride):
+            strides = [stride] + [1] * (num_blocks - 1)
+            layers = []
+            for stride in strides:
+                layers.append(block(self.in_planes, planes, widen_factor, stride))
+                self.in_planes = planes * widen_factor
+            return nn.Sequential(*layers)
 
-        x = F.relu(self.fc1(x))                   #batch_size, 120
-        x = F.relu(self.fc2(x))                   #batch_size, 84
-        x = self.fc3(x)                           #batch_size, 10
-        x = F.log_softmax(x, dim=1)               #batch_size, 10
-        return x
+        self.conv1 = LWTAConv(3, 16, kernel_size=3, num_units=2, stride=1, padding=1)
+        self.layer1 = wide_layer(WideBasicBlock, 16, num_blocks=6, stride=1)
+        self.layer2 = wide_layer(WideBasicBlock, 32, num_blocks=6, stride=2)
+        self.layer3 = wide_layer(WideBasicBlock, 64, num_blocks=6, stride=2)
+        self.bn = nn.BatchNorm2d(64 * widen_factor)
+        self.fc = nn.Linear(64 * widen_factor, num_classes)
 
-
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = F.relu(self.bn(out))
+        out = F.avg_pool2d(out, 8)
+        out = out.view(out.size(0), -1)
+        out = self.fc(out)
+        return out
 
     def save(self, model_file):
         '''Helper function, use it to save the model weights after training.'''
@@ -166,14 +304,6 @@ class Net(nn.Module):
            refered relative to the root of your project directory.
         '''
         self.load(os.path.join(project_dir, Net.model_file))
-
-    def extract_features(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return x
 
 # Fonction de similarité
 def similarity(z1, z2):
@@ -269,19 +399,6 @@ def train_model(net, train_loader, val_loader, pth_filename, num_epochs):
 
         print(f"Epoch {epoch + 1}: Validation Loss: {avg_val_loss:.3f}")
 
-    plt.plot(np.linspace(0,num_epochs,len(list_loss)+1)[1:],list_loss)
-    plt.plot(range(1,num_epochs+1), list_val_loss, label="Validation Loss")
-    plt.title("Evolution of Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.show()
-    plt.plot(range(1,num_epochs+1),accuracy_list, label="Accuracy")
-    plt.title("Evolution of Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.legend()
-    plt.show()
     net.save(pth_filename)
     print('Model saved in {}'.format(pth_filename))
 
@@ -302,11 +419,11 @@ def train_model_adversarial(net, train_loader, val_loader, pth_filename, num_epo
             inputs, labels = data[0].to(device), data[1].to(device)
             # Randomly choose the attack type for this batch
             attack_type = torch.randint(0, 7, (1,)).item()  # 0: Smoothing, 1: FGSM, 2: PGD, 3: CW, Rest: None
-            if attack_type == 0:
+            if attack_type < 2:
                 # **Smoothing**: Add random Gaussian noise to inputs
                 epsilon = torch.randn_like(inputs, device=device) * sigma
                 inputs = torch.clamp(inputs + epsilon, 0, 1)
-            elif attack_type == 1:
+            elif (attack_type < 4) and (attack_type >2 ):
                 # **FGSM Attack**: Create adversarial examples
                 inputs.requires_grad = True
                 outputs = net(inputs)
@@ -315,28 +432,18 @@ def train_model_adversarial(net, train_loader, val_loader, pth_filename, num_epo
                 loss.backward()
                 grad = inputs.grad.sign()
                 inputs = attacks.fgsm_attack(inputs, eps, grad)
-            elif attack_type == 2:
-                # **PGD Attack**: Create adversarial examples
-                inputs = attacks.pgd_attack(net, inputs, labels, eps, alpha, steps)
-            elif attack_type == 3:
-                # **Carlini-Wagner Attack**: Create adversarial examples
-                inputs = attacks.cw_attack(net, inputs, labels, c= c , kappa= kappa, steps= steps, lr=0.01)
+            # elif attack_type == 2:
+            #     # **PGD Attack**: Create adversarial examples
+            #     inputs = attacks.pgd_attack(net, inputs, labels, eps, alpha, steps)
+            # elif attack_type == 3:
+            #     # **Carlini-Wagner Attack**: Create adversarial examples
+            #     inputs = attacks.cw_attack(net, inputs, labels, c= c , kappa= kappa, steps= steps, lr=0.01)
             else:
                 # **No Attack**: Use the original inputs
                 pass
-            # Forward pass
+            # Forward pass with (potentially adversarial) inputs
             outputs = net(inputs)
-            features = net.extract_features(inputs)
-            loss_cls = criterion(outputs, labels)
-
-            # Génération des exemples négatifs
-            negatives = generate_negatives(inputs, labels, net)
-
-            # Calcul de la perte ANC
-            loss_anc = asymmetric_negative_contrast(features, net.extract_features(negatives))
-
-            # Combinaison des pertes
-            loss = loss_cls + 0.1 * loss_anc  # Pondération de la perte ANC
+            loss = criterion(outputs, labels)
 
             # Backward pass and optimizer step
             optimizer.zero_grad()
@@ -371,25 +478,79 @@ def train_model_adversarial(net, train_loader, val_loader, pth_filename, num_epo
         avg_val_loss = val_loss / len(val_loader)
         list_val_loss.append(avg_val_loss)
 
-        print(f"Epoch {epoch + 1}: Validation Loss: {avg_val_loss:.3f}, Validation Accuracy: {accuracy:.2f}")
+        print(f"Epoch {epoch + 1}: Validation Loss: {avg_val_loss:.3f}")
 
-    plt.plot(np.linspace(0,num_epochs,len(list_loss)+1)[1:],list_loss)
-    plt.plot(range(1,num_epochs+1), list_val_loss, label="Validation Loss")
-    plt.title("Evolution of Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.show()
-    plt.plot(range(1,num_epochs+1),accuracy_list, label="Accuracy")
-    plt.title("Evolution of Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.legend()
-    plt.show()
     net.save(pth_filename)
     print('Model saved in {}'.format(pth_filename))
 
+def train_model_adversarial_with_elbo(net, train_loader, val_loader, pth_filename, num_epochs, temperature=1.0, epsilon=8/255, alpha=0.007, steps=20):
+    """
+    Entraîne le modèle avec adversarial training basé sur PGD en utilisant l'ELBO.
+    """
+    print("Starting adversarial training with PGD and ELBO")
+    criterion = LWTAELBOLoss(temperature=temperature, num_units=2)
+    optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)  # Divise après 75 epochs
+    attacks = Attacks(device)
 
+    val_loss_history = []
+    val_acc_history = []
+
+    for epoch in range(num_epochs):
+        net.train()
+        running_loss = 0.0
+
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            # Generate adversarial examples using PGD
+            adv_inputs = attacks.pgd_attack(
+                model=net, images=inputs, labels=labels,
+                eps=epsilon, alpha=alpha, steps=steps
+            )
+
+            optimizer.zero_grad()
+
+            # Forward pass uniquement avec des exemples adversariaux
+            logits = net(adv_inputs)
+            outputs = F.log_softmax(logits, dim=1)
+
+            # Compute ELBO loss
+            loss = criterion(outputs, labels, logits)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        if epoch >= 75:
+            scheduler.step()
+
+        # Validation
+        net.eval()
+        val_loss = 0.0
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for val_inputs, val_labels in val_loader:
+                val_inputs, val_labels = val_inputs.to(device), val_labels.to(device)
+                val_logits = net(val_inputs)
+                val_outputs = F.log_softmax(val_logits, dim=1)
+                val_loss += criterion(val_outputs, val_labels, val_logits).item()
+                _, predicted = torch.max(val_outputs.data, 1)
+                total += val_labels.size(0)
+                correct += (predicted == val_labels).sum().item()
+
+        avg_val_loss = val_loss / len(val_loader)
+        val_accuracy = 100 * correct / total
+        val_loss_history.append(avg_val_loss)
+        val_acc_history.append(val_accuracy)
+
+        print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {running_loss:.4f}, "
+              f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {val_accuracy:.2f}%")
+
+    # Enregistrement du modèle
+    net.save(pth_filename)
+    print(f"Model saved to {pth_filename}")
 
 def test_natural(net, test_loader):
     '''Basic testing function.'''
@@ -453,7 +614,7 @@ def main():
     args = parser.parse_args()
 
     #### Create model and move it to whatever device is available (gpu/cpu)
-    net = Net(parametric_noise=args.param_noise)
+    net = Net(widen_factor=1)
     net.to(device)
     cifar = torchvision.datasets.CIFAR10('./data/', download=True, transform=transforms.ToTensor())
 
@@ -464,10 +625,23 @@ def main():
         train_loader = get_train_loader(cifar, valid_size, batch_size=batch_size)
         val_loader = get_validation_loader(cifar, valid_size, batch_size=batch_size)
         if args.adversarial:
-            train_model_adversarial(net, train_loader, val_loader, args.model_file, args.num_epochs, eps=args.epsilon, alpha=args.alpha, steps=args.num_steps, c= args.c, kappa= args.kappa)
+            train_model_adversarial_with_elbo(
+        net, train_loader, val_loader,
+        num_epochs=100, epsilon=8/255, alpha=0.007, steps=5, pth_filename=args.model_file
+    )
         else:
-            train_model(net, train_loader, val_loader, args.model_file, args.num_epochs)
-        print("Model save to '{}'.".format(args.model_file))
+            train_model(
+                net,
+                train_loader,
+                val_loader,
+                args.model_file,
+                args.num_epochs
+            )
+
+        print(f"Model saved to '{args.model_file}'.")
+    else:
+        print(f"Model already exists at '{args.model_file}'. Skipping training.")
+
 
     #### Model testing
     print(f"Testing with model from '{args.model_file}'.")
